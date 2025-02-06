@@ -1,4 +1,4 @@
-# chiral-active-bath
+# LAMMPS simulations of a chiral active bath
 ![Chiral active bath](cover_figure.png)
 Simulations of passive objects in a chiral active bath
 
