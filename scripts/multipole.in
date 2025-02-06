@@ -1,0 +1,193 @@
+# LAMMPS input script for simulating chiral ABPs in an anisotropic potential / obstacle.
+
+shell       mkdir out
+log         out/loginit.out
+variable    seed index 12345
+
+# settings
+variable    rho equal 0.10   # density
+variable    L equal 50        # Simulation box length
+variable    H equal 50        # Simulation box height
+variable    mu_x equal 1
+variable    Dx equal 0
+variable    v0 equal 1
+variable    lp equal 10
+variable    lr equal 100000000  # Achiral
+# variable    lr equal 10  # Chiral
+variable    chirality equal 1  # +1 for CCW ABPs, -1 for CW
+# -*-*-*-*-*-*--*-*-*--*-*-*-
+variable    Dtheta equal ${v0}/${lp}
+variable    omega equal 0
+variable    omega equal ${chirality}*${v0}/${lr}
+variable    gamma_x equal 1/${mu_x}
+variable    sigma equal 10
+variable    rcut equal ${sigma}*2^(1.0/6.0)  # for WCA potential
+variable    dt equal 0.005
+variable    rotation equal 0
+
+variable    s equal 10       # Nevery
+variable    p equal 1000      # Nrepeat
+variable    d equal 10000       # Nfreq
+
+# problem setup
+units       lj
+dimension   2
+atom_style  bond
+neigh_modify    delay 0 every 1
+
+# Make ABPs:
+lattice         sq ${rho}  # Set the lattice density for ABPs.
+region          simbox block -$L $L -$H $H -0.1 0.1 units box # Box units, rather than lattice
+create_box      2 simbox &
+                bond/types 1 &
+                extra/bond/per/atom 1
+molecule        object ../passive_objects/wedge_10.txt
+create_atoms    2 single 0 0 0 # Insert disc
+create_atoms    1 box # Insert ABPs on lattice
+
+group           object type 2
+group           abp type 1
+
+region          void cylinder z 0 0 ${sigma} EDGE EDGE units box
+group           voidall region void
+group           void intersect voidall abp
+delete_atoms    group void # Delete ABPs from inner circle area
+
+
+# Write out the simulation parameters for post-processing:
+variable        ly equal ly
+variable        lx equal lx
+print           '{'                                 file   params.json
+print           '   "rho": ${rho},'                 append params.json
+print           '   "lx": ${lx},'                   append params.json
+print           '   "ly": ${ly},'                   append params.json
+print           '   "Dtheta": ${Dtheta},'           append params.json
+print           '   "v0":${v0},'                    append params.json
+print           '   "lp": ${lp},'                   append params.json
+print           '   "lr": ${lr},'                   append params.json
+print           '   "gamma_x":${gamma_x},'          append params.json
+print           '   "Dx":${Dx},'                    append params.json
+print           '   "omega":${omega},'              append params.json
+print           '   "rcut": ${rcut},'               append params.json
+print           '   "dt": ${dt},'                   append params.json
+print           '   "s": $s,'                   append params.json
+print           '}'                                 append params.json
+
+# Define interactions
+pair_style      lj/cut 1
+pair_modify     shift yes
+pair_coeff      * * 0 0
+pair_coeff      1 2 1 ${sigma} ${rcut}
+mass            * 1.0
+delete_atoms    overlap 1 abp object  # NOW: Delete ABPs overlapping the object
+
+# Define fixes that affect dynamics
+fix             1 abp property/atom d_thetavec  # Initialize vector of directors (this gets used inside fix abp)
+fix             2 abp abp ${Dx} ${Dtheta} ${gamma_x} ${omega} ${v0} ${seed} # DX DTHETA GAMMA_X OMEGA V0 SEED $T
+fix             2d all enforce2d
+
+
+# Equilibration run
+variable        theta_init atom random(0,2*PI,${seed})
+set             atom * d_thetavec v_theta_init
+fix             freeze object setforce 0.0 0.0 0.0
+minimize        1.0e-4 1.0e-6 100 1000
+write_dump      all xyz init.xyz
+thermo          1000
+thermo_style    custom step dt temp press cpu spcpu density lx
+# fix             dt_adapt all dt/reset/abp 1 1.0e-5 0.1 0.1 ${v0} ${mu_x} units box  # ABP Adaptive timestep
+timestep        ${dt} # Reset dt to small value before every call to `run` with adaptive timestep
+run             100000
+write_dump      all xyz eq.xyz
+
+# Production run:
+label           production_run
+log             out/log.out
+timestep        ${dt}
+
+
+# Analysis
+variable        rvtheta atom (x*vy)-(y*vx)
+variable        rftheta atom ((x*fy)-(y*fx))
+compute         theta all property/atom d_thetavec
+variable        mx atom cos(c_theta)
+variable        my atom sin(c_theta)
+variable        mxfx atom cos(c_theta)*fx
+variable        myfx atom sin(c_theta)*fx
+variable        mxfy atom cos(c_theta)*fy
+variable        myfy atom sin(c_theta)*fy
+
+
+variable        Qxx atom cos(c_theta)*cos(c_theta)-1/2
+variable        Qxy atom cos(c_theta)*sin(c_theta)
+variable        Qyx atom sin(c_theta)*cos(c_theta)
+variable        Qyy atom sin(c_theta)*sin(c_theta)-1/2
+
+compute         ccgrid abp chunk/atom bin/2d x lower 1 y lower 1 units box
+fix             6 abp ave/chunk $s $p $d ccgrid &
+                vx vy v_rvtheta fx fy v_rftheta v_mx v_my v_mxfx v_myfx v_mxfy v_myfy v_Qxx v_Qxy v_Qyx v_Qyy density/number &
+                ave running overwrite file out/avegrid.out
+
+# compute         ccgrid abp chunk/atom bin/2d x lower 1 y lower 1 units box
+# fix             6 abp ave/chunk $s $p $d ccgrid &
+#                 vx vy density/number &
+#                 ave running overwrite file out/avegrid.out
+
+
+# Compute multipole moments from the density field itself:
+variable        r       atom sqrt(x^2+y^2)
+variable        xn      atom x/v_r
+variable        yn      atom y/v_r
+variable        xxn     atom v_xn*v_xn
+variable        yyn     atom v_yn*v_yn
+variable        xyn     atom v_xn*v_yn
+
+variable        vtheta     atom v_rvtheta/v_r
+variable        r2vtheta     atom v_r*v_rvtheta
+variable        xrvtheta     atom v_xn*v_rvtheta
+variable        yrvtheta     atom v_yn*v_rvtheta
+variable        xxrvtheta    atom v_xn*v_xn*v_rvtheta
+variable        yyrvtheta    atom v_yn*v_yn*v_rvtheta
+variable        xyrvtheta    atom v_xn*v_yn*v_rvtheta
+
+# compute         cccircles abp chunk/atom bin/sphere 0 0 0 0 $L 500 units box
+# fix             7 abp ave/chunk $s $p $d cccircles &
+#                 v_xn v_yn v_xxn v_yyn v_xyn &
+#                 v_rvtheta v_r2vtheta v_xrvtheta v_yrvtheta v_xxrvtheta v_yyrvtheta v_xyrvtheta density/number &
+#                 ave running overwrite file out/avecircle.out
+
+compute         cccircles abp chunk/atom bin/sphere 0 0 0 0 $L 1000 units box
+fix             7 abp ave/chunk $s $p $d cccircles &
+                v_rvtheta v_r2vtheta density/number &
+                ave running overwrite file out/avecircle.out
+                # v_xn v_yn v_xxn v_yyn v_xyn &
+
+
+region          subbox block -20.0 20.0 -20 20 -0.1 0.1 units box  # inner box containing object
+
+variable        Qxx1 atom x*fx
+variable        Qxy1 atom x*fy
+variable        Qyx1 atom y*fx
+variable        Qyy1 atom y*fy
+
+variable        Qxx2 atom v_mx*fx
+variable        Qxy2 atom v_mx*fy
+variable        Qyx2 atom v_my*fx
+variable        Qyy2 atom v_my*fy
+
+compute         moments abp reduce/region subbox sum fx fy &
+                v_Qxx1 v_Qxy1 v_Qyx1 v_Qyy1 v_Qxx2 v_Qxy2 v_Qyx2 v_Qyy2 &
+                v_vtheta v_r2vtheta
+fix             avg_moments all ave/time $s $p $d c_moments[*] &
+                ave running overwrite file out/moments.out
+
+compute         forces object reduce/region subbox sum fx fy v_rftheta  # Compute net force and torque on object
+fix             avg_forces all ave/time $s $p $d c_forces[*] &
+                ave running overwrite file out/forces.out
+
+# dump            traj all xyz 20 out/traj.xyz
+thermo_style    custom step dt temp press cpu spcpu
+thermo          1000
+timestep        ${dt} # Reset dt to small value before every call to `run` with adaptive timestep
+run             1000000000
+write_dump      all xyz final.xyz

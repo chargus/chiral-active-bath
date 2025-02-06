@@ -1,0 +1,160 @@
+# LAMMPS input script for simulating wedge in chiral ABP bath
+
+shell       mkdir out
+log         out/loginit.out
+variable    seed index 12345
+
+# settings
+variable    rho equal 0.50   # density
+variable    L equal 100        # Simulation box size
+variable    L2 equal $L/2
+variable    Nabp equal round(${rho}*$L^2)
+variable    masswedge equal 1
+variable    mu_x equal 1
+variable    Dx equal 0
+variable    v0 equal 1
+variable    lp equal 10
+variable    lr equal 3
+variable    chirality equal -1  # +1 for CCW ABPs, -1 for CW
+# -*-*-*-*-*-*--*-*-*--*-*-*-
+variable    Dtheta equal ${v0}/${lp}
+variable    omega equal ${chirality}*${v0}/${lr}
+variable    gamma_x equal 1/${mu_x}
+variable    sigma equal 1
+variable    rcut equal ${sigma}*2^(1.0/6.0)  # for WCA potential
+variable    dt equal 0.01
+variable    g equal 0.0 # Multiply by number of particles in the wedge to get the true pulling force
+
+
+# problem setup
+units       lj
+dimension   2
+atom_style  bond
+neigh_modify    delay 0 every 1
+
+# Make ABPs:
+lattice         sq ${rho}  # Set the lattice density for ABPs.
+region          simbox block -${L2} ${L2} -${L2} ${L2} -0.1 0.1 units box # Box units, rather than lattice
+create_box      2 simbox &
+                bond/types 1 &
+                extra/bond/per/atom 1
+molecule        wedge mymol.txt
+create_atoms    1 single 0 0 0 mol wedge 12345 rotate 150 0 0 1 # Insert wedge with angle pi/3 pointing towards +x
+create_atoms    1 random ${Nabp} ${seed} NULL overlap 2 maxtry 100 # Insert passive tracers randomly
+
+group           abp type 1
+group           wedge type 2
+
+
+# Write out the simulation parameters for post-processing:
+variable        ly equal ly
+variable        lx equal lx
+print           '{'                                 file   params.json
+print           '   "masswedge": ${masswedge},'       append params.json
+print           '   "rho": ${rho},'                 append params.json
+print           '   "lx": ${lx},'                   append params.json
+print           '   "ly": ${ly},'                   append params.json
+print           '   "Dtheta": ${Dtheta},'           append params.json
+print           '   "v0":${v0},'                    append params.json
+print           '   "lp": ${lp},'                   append params.json
+print           '   "lr": ${lr},'                   append params.json
+print           '   "gamma_x":${gamma_x},'          append params.json
+print           '   "Dx":${Dx},'                    append params.json
+print           '   "omega":${omega},'              append params.json
+print           '   "rcut": ${rcut},'               append params.json
+print           '   "dt": ${dt},'                   append params.json
+print           '   "g": $g,'                       append params.json
+print           '}'                                 append params.json
+
+# Define interactions
+pair_style      lj/cut 1
+pair_modify     shift yes
+pair_coeff      * * 0 0
+pair_coeff      1 2 1 ${sigma} ${rcut}
+mass            1 1.0
+mass            2 ${masswedge}  # Mass of one bead in the wedge particle
+delete_atoms    overlap 0.5 abp wedge  # NOW: Delete ABPs overlapping the wedge object (with random rotation)
+
+
+# Define fixes that affect dynamics
+fix             1 abp property/atom d_thetavec  # Initialize vector of directors (this gets used inside fix abp)
+fix             2 abp abp ${Dx} ${Dtheta} ${gamma_x} ${omega} ${v0} ${seed} # DX DTHETA GAMMA_X OMEGA V0 SEED
+# fix             2a abp langevin 2 2 ${mu_x} ${seed} # Passive bath
+# fix             2b abp nve                          # Passive bath
+fix             rigid wedge rigid/nve molecule  ## Free
+fix             2d all enforce2d
+
+
+# Equilibration run
+label           equilibrate
+variable        theta_init atom random(0,2*PI,${seed})
+set             atom * d_thetavec v_theta_init  # Initialize ABPs with random directions
+write_dump      all xyz init.xyz
+thermo          1000
+thermo_style    custom step temp press cpu spcpu density lx
+timestep        ${dt}
+run             10000
+write_dump      all xyz eq.xyz
+
+# Production run:
+label           production_run
+log             out/log.out
+timestep        ${dt}
+
+
+# Compute COM motion and rotation
+variable        xcom equal f_rigid[1][1]   # xCOM
+variable        ycom equal f_rigid[1][2]   # yCOM
+variable        vxcom equal f_rigid[1][4]  # vx of COM
+variable        vycom equal f_rigid[1][5]  # vy of COM
+group atom1 id 1
+group atom2 id 2
+compute ru1a atom1 property/atom xu yu
+compute ru1 atom1 reduce ave c_ru1a[*]  # Technically needed to turn per-atom vector into global vector
+compute ru2a atom2 property/atom xu yu
+compute ru2 atom2 reduce ave c_ru2a[*]  # Technically needed to turn per-atom vector into global vector
+variable        x equal c_ru2[1]-c_ru1[1]
+variable        y equal c_ru2[2]-c_ru1[2]
+variable        vx equal vx[2]-vx[1]
+variable        vy equal vy[2]-vy[1]
+variable        omega_tracer equal (v_x*v_vy-v_y*v_vx)/(v_x^2+v_y^2)
+
+# Option 1) Measure response in global reference frame to force in x-direction:
+# fix             fx wedge addforce $g 0.0 0.0
+# variable        vx equal vx[1]
+# variable        vy equal vy[1]
+# variable        Teff equal .5*v_mass*(vx[1]^2+vy[1]^2)
+# fix             vavg wedge ave/time 10 10000 100000 &
+#                 v_vx v_vy v_omega_tracer &
+#                 file out/v_avg.out
+
+
+# Option 2) Measure response in local reference frame to *following* force in parallel direction:
+
+compute         com wedge com
+variable        ux equal c_ru1[1]-c_com[1]
+variable        uy equal c_ru1[2]-c_com[2]
+variable        unorm equal sqrt(v_ux^2+v_uy^2)
+variable        uxnorm equal v_ux/v_unorm
+variable        uynorm equal v_uy/v_unorm
+variable        vlong  equal v_uxnorm*v_vxcom+v_uynorm*v_vycom
+variable        vtrans equal v_uxnorm*v_vycom-v_uynorm*v_vxcom
+fix             vavg wedge ave/time 10 1000 10000 v_vlong v_vtrans v_omega_tracer ave running overwrite file out/vavg.out
+
+
+variable        ru1x equal c_ru1[1]
+variable        ru1y equal c_ru1[2]
+fix             writeout all print 100 "${ru1x} ${ru1y} ${uxnorm} ${uynorm}" screen no file out/director.txt
+
+
+variable        fx equal $g*v_uxnorm
+variable        fy equal $g*v_uynorm
+fix             fpar wedge addforce v_fx v_fy 0.0
+
+
+group           wedge_points id 1 101 201  # Use only the three points defining the wedge in the trajectory
+dump            traj wedge_points xyz 100 out/traj.xyz
+thermo_style    custom step temp press cpu spcpu f_vavg[1] f_vavg[2] f_vavg[3]
+thermo          10000
+run             1000000000
+write_dump      all xyz final.xyz

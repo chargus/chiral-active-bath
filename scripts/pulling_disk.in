@@ -1,0 +1,134 @@
+# LAMMPS input script for pulling a disc through a chiral ABPs bath
+
+shell       mkdir out
+log         out/loginit.out
+variable    seed index 12345
+
+# settings
+variable    rho equal 0.10   # density
+variable    L equal 100        # Simulation box length
+variable    W equal 50       # Simulation box width
+variable    mass equal 10
+variable    mu_x equal 1
+variable    Dx equal 0
+variable    v0 equal 1
+variable    lp equal 50
+variable    lr equal 2
+variable    g equal 0.1
+# variable    g equal 0
+variable    chirality equal -1  # +1 for CCW ABPs, -1 for CW
+variable    Bq equal 1  # Lorentz force magnitude (magnetic field times charge)
+# -*-*-*-*-*-*--*-*-*--*-*-*-
+variable    Dtheta equal ${v0}/${lp}
+variable    omega equal ${chirality}*${v0}/${lr}
+variable    gamma_x equal 1/${mu_x}
+variable    sigma equal 2
+variable    rcut equal ${sigma}*2^(1.0/6.0)  # for WCA posuntial
+variable    dt equal 0.01
+
+
+# problem setup
+units       lj
+dimension   2
+atom_style  atomic
+neigh_modify    delay 0 every 1
+# newton          on off
+atom_modify     map yes # Create atom map to be able to index into atom positions and velocities
+
+
+# Make ABPs:
+lattice         sq ${rho}  # Set the lattice density for ABPs.
+region          simbox block 0 $L 0 $W -0.1 0.1 units box # Box units, rather than lattice
+create_box      2 simbox
+create_atoms    2 single 0 0 0 # Insert disc obstacle
+create_atoms    1 box # Insert ABPs on lattice
+
+group           abp type 1
+group           disc type 2
+
+
+# Write out the simulation parameters for post-processing:
+variable        ly equal ly
+variable        lx equal lx
+print           '{'                                 file   params.json
+print           '   "mass": ${mass},'               append params.json
+print           '   "g": ${g},'                     append params.json
+print           '   "rho": ${rho},'                 append params.json
+print           '   "lx": ${lx},'                   append params.json
+print           '   "ly": ${ly},'                   append params.json
+print           '   "Dtheta": ${Dtheta},'           append params.json
+print           '   "v0":${v0},'                    append params.json
+print           '   "lp": ${lp},'                   append params.json
+print           '   "lr": ${lr},'                   append params.json
+print           '   "gamma_x":${gamma_x},'          append params.json
+print           '   "Dx":${Dx},'                    append params.json
+print           '   "omega":${omega},'              append params.json
+print           '   "rcut": ${rcut},'               append params.json
+print           '   "dt": ${dt},'                   append params.json
+print           '}'                                 append params.json
+
+# Define interactions
+pair_style      lj/cut 1
+pair_modify     shift yes
+# pair_coeff      * * 0 0
+# pair_coeff      1 2 1 ${sigma} ${rcut}
+pair_coeff      * * 1 ${sigma} ${rcut} # Everything interacts
+# pair_coeff      1 1 1 0
+mass            1 1.0
+mass            2 ${mass}  # Mass of one bead in the disc particle
+delete_atoms    overlap 0.5 abp disc  # NOW: Delete ABPs overlapping the disc object (with random rotation)
+
+# Define fixes that affect dynamics:
+
+# * * * * cABP Bath * * * *
+# fix             1 abp property/atom d_thetavec  # Initialize vector of directors (this gets used inside fix abp)
+# fix             2 abp abp ${Dx} ${Dtheta} ${gamma_x} ${omega} ${v0} ${seed} # DX DTHETA GAMMA_X OMEGA V0 SEED
+# variable        theta_init atom random(0,2*PI,${seed})
+# set             atom * d_thetavec v_theta_init  # Initialize ABPs with random directions
+
+# * * * * Eqbm Lorentz Bath * * * *
+variable        fxlorentz atom -v_Bq*vy
+variable        fylorentz atom v_Bq*vx
+fix             lorentz abp addforce v_fxlorentz v_fylorentz 0
+fix             1 abp langevin 1.0 1.0 10.0 ${seed} # add a weak Langevin thermostat to avoid Lorentz integration issues
+fix             2 abp nve
+velocity        all create 1.0 ${seed} loop local
+
+# * * * * Disc dynamics * * * *
+fix             3 disc nve
+fix             2d all enforce2d
+fix             fx disc addforce $g 0.0 0.0
+
+
+
+# Equilibration run
+write_dump      all xyz init.xyz
+thermo          1000
+thermo_style    custom step temp press cpu spcpu density lx
+timestep        ${dt}
+run             10000
+write_dump      all xyz eq.xyz
+
+# Production run:
+label           production_run
+log             out/log.out
+timestep        ${dt}
+
+
+# Measure parallel and perpendicular drift
+# variable        Teff_atom atom .5*v_mass*(vx^2+vy^2)
+# compute         Teff_disc disc reduce ave v_Teff_atom  # Alternate way of computing disc temperature
+variable        vx equal vx[1]
+variable        vy equal vy[1]
+variable        Teff equal .5*v_mass*(vx[1]^2+vy[1]^2)
+fix             vavg disc ave/time 10 10000 100000 &
+                v_vx v_vy v_Teff &
+                file out/v_avg.out
+
+
+
+dump            traj all xyz 10000000 out/traj.xyz  # Check for "wake" due to finite size PBCs
+thermo_style    custom step temp press cpu spcpu v_vx f_vavg[1] f_vavg[2] f_vavg[3] #f_vavg[4]
+thermo          100000
+run             1000000000
+write_dump      all xyz final.xyz

@@ -1,0 +1,185 @@
+# LAMMPS input script for simulating wedge in chiral ABP bath
+
+shell       mkdir out
+log         out/loginit.out
+variable    seed index 12345
+
+# settings
+variable    rho equal 0.50   # density
+variable    L equal 100        # Simulation box size
+variable    L2 equal $L/2
+variable    Nabp equal round(${rho}*$L^2)
+variable    masswedge equal 1
+variable    mu_x equal 1
+variable    Dx equal 0
+variable    v0 equal 1
+variable    lp equal 10
+variable    lr equal 5
+variable    chirality equal -1  # +1 for CCW ABPs, -1 for CW
+# -*-*-*-*-*-*--*-*-*--*-*-*-
+variable    Dtheta equal ${v0}/${lp}
+variable    omega equal ${chirality}*${v0}/${lr}
+variable    gamma_x equal 1/${mu_x}
+variable    sigma equal 1
+variable    rcut equal ${sigma}*2^(1.0/6.0)  # for WCA potential
+variable    dt equal 0.01
+
+variable    s equal 40       # Nevery
+variable    p equal 5000       # Nrepeat
+variable    d equal 200000       # Nfreq
+
+variable    sgk equal ceil(200*${masswedge})       # Nevery
+variable    pgk equal 5000                    # Nrepeat
+variable    dgk equal ${sgk}*${pgk}       # Nfreq
+
+# problem setup
+units       lj
+dimension   2
+atom_style  bond
+neigh_modify    delay 0 every 1
+
+# Make ABPs:
+lattice         sq ${rho}  # Set the lattice density for ABPs.
+region          simbox block -${L2} ${L2} -${L2} ${L2} -0.1 0.1 units box # Box units, rather than lattice
+create_box      2 simbox &
+                bond/types 1 &
+                extra/bond/per/atom 1
+molecule        wedge ../passive_objects/wedge_10.txt
+create_atoms    1 single 0 0 0 mol wedge 12345 rotate 150 0 0 1 # Insert wedge with angle pi/3 pointing towards +x
+create_atoms    1 random ${Nabp} ${seed} NULL overlap 2 maxtry 100 # Insert passive tracers randomly
+
+group           abp type 1
+group           wedge type 2
+
+
+# Write out the simulation parameters for post-processing:
+variable        ly equal ly
+variable        lx equal lx
+print           '{'                                 file   params.json
+print           '   "masswedge": ${masswedge},'       append params.json
+print           '   "rho": ${rho},'                 append params.json
+print           '   "lx": ${lx},'                   append params.json
+print           '   "ly": ${ly},'                   append params.json
+print           '   "Dtheta": ${Dtheta},'           append params.json
+print           '   "v0":${v0},'                    append params.json
+print           '   "lp": ${lp},'                   append params.json
+print           '   "lr": ${lr},'                   append params.json
+print           '   "gamma_x":${gamma_x},'          append params.json
+print           '   "Dx":${Dx},'                    append params.json
+print           '   "omega":${omega},'              append params.json
+print           '   "rcut": ${rcut},'               append params.json
+print           '   "dt": ${dt},'                   append params.json
+print           '   "s": $s,'                   append params.json
+print           '   "sgk": ${sgk},'                   append params.json
+print           '}'                                 append params.json
+
+# Define interactions
+pair_style      lj/cut 1
+pair_modify     shift yes
+pair_coeff      * * 0 0
+pair_coeff      1 2 1 ${sigma} ${rcut}
+mass            1 1.0
+mass            2 ${masswedge}  # Mass of one bead in the wedge particle
+delete_atoms    overlap 0.5 abp wedge  # NOW: Delete ABPs overlapping the wedge object (with random rotation)
+
+
+# Define fixes that affect dynamics
+fix             1 abp property/atom d_thetavec  # Initialize vector of directors (this gets used inside fix abp)
+fix             2 abp abp ${Dx} ${Dtheta} ${gamma_x} ${omega} ${v0} ${seed} # DX DTHETA GAMMA_X OMEGA V0 SEED
+# fix             2a abp langevin 2 2 ${mu_x} ${seed} # Passive bath
+# fix             2b abp nve                          # Passive bath
+fix             rigid wedge rigid/nve molecule  ## Free
+fix             2d all enforce2d
+
+
+
+# Equilibration run
+variable        theta_init atom random(0,2*PI,${seed})
+set             atom * d_thetavec v_theta_init  # Initialize ABPs with random directions
+write_dump      all xyz init.xyz
+thermo          1000
+thermo_style    custom step temp press cpu spcpu density lx
+timestep        ${dt}
+run             10000
+write_dump      all xyz eq.xyz
+
+# Production run:
+label           production_run
+log             out/log.out
+timestep        ${dt}
+
+
+# Static GK: (all correlators, check that cross terms are zero for wedge)
+# variable        xcom equal xcm(wedge,x)
+# variable        ycom equal xcm(wedge,y)
+# variable        dxatom atom x-v_xcom
+# variable        dyatom atom y-v_ycom
+# variable        torque_atom atom (v_dxatom*fy-v_dyatom*fx)
+# compute         torque wedge reduce sum v_torque_atom
+# fix             torque_avg wedge ave/time $s 1 $s c_torque ave running overwrite file out/torque_avg.out
+# variable        dtorque equal c_torque-f_torque_avg
+
+# variable        fx atom fx
+# compute         fxall wedge reduce sum v_fx
+# fix             fx_avg wedge ave/time $s 1 $s c_fxall ave running overwrite file out/fx_avg.out
+# variable        dfxall equal c_fxall-f_fx_avg
+
+# variable        fy atom fy
+# compute         fyall wedge reduce sum v_fy
+# fix             fy_avg wedge ave/time $s 1 $s c_fyall ave running overwrite file out/fy_avg.out
+# variable        dfyall equal c_fyall-f_fy_avg
+
+# # fix             corr wedge ave/correlate $s $p $d c_torque c_fxall c_fyall &
+# #                 type full ave running overwrite file out/corr.out
+
+# fix             dcorr wedge ave/correlate $s $p $d v_dtorque v_dfxall v_dfyall &
+#                 type full ave running overwrite start 100000 file out/dcorr.out
+
+# compute         ccgrid abp chunk/atom bin/2d x lower 0.005 y lower 0.005 units reduced
+# fix             6 abp ave/chunk $s $p $d ccgrid&
+#                 density/number vx vy fx fy &
+#                 ave running overwrite file out/avegrid.out
+
+# Dynamical GK:
+variable        xcom equal f_rigid[1][1]   # xCOM
+variable        ycom equal f_rigid[1][2]   # yCOM
+variable        vxcom equal f_rigid[1][4]  # vx of COM
+variable        vycom equal f_rigid[1][5]  # vy of COM
+
+# Use groups to compute distance between two wedge atoms (necessary in newer LAMMPS versions)
+group atom1 id 1
+group atom2 id 2
+compute ru1a atom1 property/atom xu yu
+compute ru1 atom1 reduce ave c_ru1a[*]
+compute ru2a atom2 property/atom xu yu
+compute ru2 atom2 reduce ave c_ru2a[*]
+variable        x equal c_ru2[1]-c_ru1[1]
+variable        y equal c_ru2[2]-c_ru1[2]
+variable        vx equal vx[2]-vx[1]
+variable        vy equal vy[2]-vy[1]
+variable        omega equal (v_x*v_vy-v_y*v_vx)/(v_x^2+v_y^2)
+fix             omega_avg wedge ave/time 10 1000 10000 v_omega ave running overwrite file out/omega.out
+
+compute         com wedge com
+variable        ux equal c_ru1[1]-c_com[1]
+variable        uy equal c_ru1[2]-c_com[2]
+variable        unorm equal sqrt(v_ux^2+v_uy^2)
+variable        uxnorm equal v_ux/v_unorm
+variable        uynorm equal v_uy/v_unorm
+variable        vlong  equal v_uxnorm*v_vxcom+v_uynorm*v_vycom
+variable        vtrans equal v_uxnorm*v_vycom-v_uynorm*v_vxcom
+fix             vavg wedge ave/time 10 1000 10000 v_vlong v_vtrans ave running overwrite file out/vavg.out
+
+fix             dyncorr wedge ave/correlate ${sgk} ${pgk} ${dgk} v_omega v_vxcom v_vycom &
+                type full ave running overwrite file out/dyncorr.out
+
+fix             dyncorr_longtrans wedge ave/correlate ${sgk} ${pgk} ${dgk} v_omega v_vlong v_vtrans &
+                type full ave running overwrite file out/dyncorr_longtrans.out
+
+# compute         mychunk wedge chunk/atom molecule
+# compute         mom wedge inertia/chunk mychunk
+# dump            traj all xyz 100 out/traj.xyz
+thermo_style    custom step temp press cpu spcpu v_x #f_omega_avg f_vavg[1] f_vavg[2] #v_vlong v_vtrans
+thermo          10000
+run             1000000000
+write_dump      all xyz final.xyz

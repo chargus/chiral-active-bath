@@ -1,0 +1,227 @@
+variable    seed index 12345
+
+# settings
+variable    rho equal 0.10   # density
+variable    L equal 100        # Simulation box length
+variable    W equal 50       # Simulation box width
+variable    mass equal 10
+variable    mu_x equal 1
+variable    Dx equal 0
+variable    v0 equal 1
+variable    lp equal 50
+variable    lr equal 2
+variable    g equal 0.1
+# variable    g equal 0
+variable    chirality equal -1  # +1 for CCW ABPs, -1 for CW
+variable    Bq equal 1  # Lorentz force magnitude (magnetic field times charge)
+# -*-*-*-*-*-*--*-*-*--*-*-*-
+variable    Dtheta equal ${v0}/${lp}
+variable    Dtheta equal 1/${lp}
+variable    Dtheta equal 1/50
+variable    omega equal ${chirality}*${v0}/${lr}
+variable    omega equal -1*${v0}/${lr}
+variable    omega equal -1*1/${lr}
+variable    omega equal -1*1/2
+variable    gamma_x equal 1/${mu_x}
+variable    gamma_x equal 1/1
+variable    sigma equal 2
+variable    rcut equal ${sigma}*2^(1.0/6.0)  # for WCA posuntial
+variable    rcut equal 2*2^(1.0/6.0)  
+variable    dt equal 0.01
+
+
+# problem setup
+units       lj
+dimension   2
+atom_style  atomic
+neigh_modify    delay 0 every 1
+# newton          on off
+atom_modify     map yes # Create atom map to be able to index into atom positions and velocities
+
+
+# Make ABPs:
+lattice         sq ${rho}  # Set the lattice density for ABPs.
+lattice         sq 0.1  
+Lattice spacing in x,y,z = 3.1622777 3.1622777 3.1622777
+region          simbox block 0 $L 0 $W -0.1 0.1 units box # Box units, rather than lattice
+region          simbox block 0 100 0 $W -0.1 0.1 units box 
+region          simbox block 0 100 0 50 -0.1 0.1 units box 
+create_box      2 simbox
+Created orthogonal box = (0 0 -0.1) to (100 50 0.1)
+  1 by 1 by 1 MPI processor grid
+create_atoms    2 single 0 0 0 # Insert disc obstacle
+Created 1 atoms
+  using lattice units in orthogonal box = (0 0 -0.1) to (100 50 0.1)
+  create_atoms CPU = 0.000 seconds
+create_atoms    1 box # Insert ABPs on lattice
+Created 512 atoms
+  using lattice units in orthogonal box = (0 0 -0.1) to (100 50 0.1)
+  create_atoms CPU = 0.000 seconds
+
+group           abp type 1
+512 atoms in group abp
+group           disc type 2
+1 atoms in group disc
+
+
+# Write out the simulation parameters for post-processing:
+variable        ly equal ly
+variable        lx equal lx
+print           '{'                                 file   params.json
+{
+print           '   "mass": ${mass},'               append params.json
+   "mass": 10,
+print           '   "g": ${g},'                     append params.json
+   "g": 0.1,
+print           '   "rho": ${rho},'                 append params.json
+   "rho": 0.1,
+print           '   "lx": ${lx},'                   append params.json
+   "lx": 100,
+print           '   "ly": ${ly},'                   append params.json
+   "ly": 50,
+print           '   "Dtheta": ${Dtheta},'           append params.json
+   "Dtheta": 0.02,
+print           '   "v0":${v0},'                    append params.json
+   "v0":1,
+print           '   "lp": ${lp},'                   append params.json
+   "lp": 50,
+print           '   "lr": ${lr},'                   append params.json
+   "lr": 2,
+print           '   "gamma_x":${gamma_x},'          append params.json
+   "gamma_x":1,
+print           '   "Dx":${Dx},'                    append params.json
+   "Dx":0,
+print           '   "omega":${omega},'              append params.json
+   "omega":-0.5,
+print           '   "rcut": ${rcut},'               append params.json
+   "rcut": 2.24492409661875,
+print           '   "dt": ${dt},'                   append params.json
+   "dt": 0.01,
+print           '}'                                 append params.json
+}
+
+# Define interactions
+pair_style      lj/cut 1
+pair_modify     shift yes
+# pair_coeff      * * 0 0
+# pair_coeff      1 2 1 ${sigma} ${rcut}
+pair_coeff      * * 1 ${sigma} ${rcut} # Everything interacts
+pair_coeff      * * 1 2 ${rcut} 
+pair_coeff      * * 1 2 2.24492409661875 
+# pair_coeff      1 1 1 0
+mass            1 1.0
+mass            2 ${mass}  # Mass of one bead in the disc particle
+mass            2 10  
+delete_atoms    overlap 0.5 abp disc  # NOW: Delete ABPs overlapping the disc object (with random rotation)
+System init for delete_atoms ...
+Generated 0 of 1 mixed pair_coeff terms from geometric mixing rule
+Neighbor list info ...
+  update: every = 1 steps, delay = 0 steps, check = yes
+  max neighbors/atom: 2000, page size: 100000
+  master list distance cutoff = 2.5449241
+  ghost atom cutoff = 2.5449241
+  binsize = 1.272462, bins = 79 40 1
+  2 neighbor lists, perpetual/occasional/extra = 1 1 0
+  (1) command delete_atoms, occasional
+      attributes: full, newton on
+      pair build: full/bin/atomonly
+      stencil: full/bin/2d
+      bin: standard
+  (2) pair lj/cut, perpetual
+      attributes: half, newton on
+      pair build: half/bin/atomonly/newton
+      stencil: half/bin/2d
+      bin: standard
+Deleted 1 atoms, new total = 512
+
+# Define fixes that affect dynamics:
+
+# * * * * cABP Bath * * * *
+# fix             1 abp property/atom d_thetavec  # Initialize vector of directors (this gets used inside fix abp)
+# fix             2 abp abp ${Dx} ${Dtheta} ${gamma_x} ${omega} ${v0} ${seed} # DX DTHETA GAMMA_X OMEGA V0 SEED
+# variable        theta_init atom random(0,2*PI,${seed})
+# set             atom * d_thetavec v_theta_init  # Initialize ABPs with random directions
+
+# * * * * Eqbm Lorentz Bath * * * *
+variable        fxlorentz atom -v_Bq*vy
+variable        fylorentz atom v_Bq*vx
+fix             lorentz abp addforce v_fxlorentz v_fylorentz 0
+fix             1 abp langevin 1.0 1.0 10.0 ${seed} # add a weak Langevin thermostat to avoid Lorentz integration issues
+fix             1 abp langevin 1.0 1.0 10.0 12345 
+fix             2 abp nve
+velocity        all create 1.0 ${seed} loop local
+velocity        all create 1.0 12345 loop local
+
+# * * * * Disc dynamics * * * *
+fix             3 disc nve
+fix             2d all enforce2d
+fix             fx disc addforce $g 0.0 0.0
+fix             fx disc addforce 0.1 0.0 0.0
+
+
+
+# Equilibration run
+write_dump      all xyz init.xyz
+WARNING: Calling write_dump before a full system init. (src/write_dump.cpp:65)
+thermo          1000
+thermo_style    custom step temp press cpu spcpu density lx
+timestep        ${dt}
+timestep        0.01
+run             10000
+Generated 0 of 1 mixed pair_coeff terms from geometric mixing rule
+Neighbor list info ...
+  update: every = 1 steps, delay = 0 steps, check = yes
+  max neighbors/atom: 2000, page size: 100000
+  master list distance cutoff = 2.5449241
+  ghost atom cutoff = 2.5449241
+  binsize = 1.272462, bins = 79 40 1
+  1 neighbor lists, perpetual/occasional/extra = 1 0 0
+  (1) pair lj/cut, perpetual
+      attributes: half, newton on
+      pair build: half/bin/atomonly/newton
+      stencil: half/bin/2d
+      bin: standard
+Per MPI rank memory allocation (min/avg/max) = 3.573 | 3.573 | 3.573 Mbytes
+   Step          Temp          Press           CPU           S/CPU         Density           Lx      
+         0   1              0.15249032     0              0              0.1042         100          
+      1000   1.0669968      0.23647373     0.078177302    12791.264      0.1042         100          
+      2000   1.0244698      0.22795085     0.15888783     12390.073      0.1042         100          
+      3000   1.0616775      0.22443206     0.24020565     12297.413      0.1042         100          
+      4000   1.0526186      0.23262097     0.32172448     12267.118      0.1042         100          
+      5000   1.0097914      0.2315536      0.40336721     12248.465      0.1042         100          
+      6000   1.0939676      0.23354175     0.48219524     12685.876      0.1042         100          
+      7000   1.0464591      0.26225678     0.5615649      12599.269      0.1042         100          
+      8000   1.0363963      0.22844973     0.64143053     12521.03       0.1042         100          
+      9000   1.0768445      0.2324734      0.72027204     12683.626      0.1042         100          
+     10000   1.0704395      0.23782133     0.79994834     12550.835      0.1042         100          
+Loop time of 0.799959 on 1 procs for 10000 steps with 512 atoms
+
+Performance: 10800558.119 tau/day, 12500.646 timesteps/s, 6.400 Matom-step/s
+99.9% CPU use with 1 MPI tasks x 1 OpenMP threads
+
+MPI task timing breakdown:
+Section |  min time  |  avg time  |  max time  |%varavg| %total
+---------------------------------------------------------------
+Pair    | 0.070217   | 0.070217   | 0.070217   |   0.0 |  8.78
+Neigh   | 0.089801   | 0.089801   | 0.089801   |   0.0 | 11.23
+Comm    | 0.026586   | 0.026586   | 0.026586   |   0.0 |  3.32
+Output  | 0.00019373 | 0.00019373 | 0.00019373 |   0.0 |  0.02
+Modify  | 0.58342    | 0.58342    | 0.58342    |   0.0 | 72.93
+Other   |            | 0.02974    |            |       |  3.72
+
+Nlocal:            512 ave         512 max         512 min
+Histogram: 1 0 0 0 0 0 0 0 0 0
+Nghost:             81 ave          81 max          81 min
+Histogram: 1 0 0 0 0 0 0 0 0 0
+Neighs:            309 ave         309 max         309 min
+Histogram: 1 0 0 0 0 0 0 0 0 0
+
+Total # of neighbors = 309
+Ave neighs/atom = 0.60351562
+Neighbor list builds = 2201
+Dangerous builds = 0
+write_dump      all xyz eq.xyz
+
+# Production run:
+label           production_run
+log             out/log.out

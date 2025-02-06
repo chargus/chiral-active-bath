@@ -1,0 +1,166 @@
+# LAMMPS input script for simulating chiral ABPs in an anisotropic potential / obstacle.
+
+shell       mkdir out
+log         out/loginit.out
+variable    seed index 12345
+
+# settings
+variable    rho equal 0.50   # density
+variable    L equal 100        # Simulation box size
+variable    L2 equal $L/2
+variable    Nabp equal round(${rho}*$L^2)
+variable    massline equal 0.1
+variable    mu_x equal 1
+variable    Dx equal 0
+variable    v0 equal 1
+variable    lp equal 10
+variable    lr equal 5 #00000000000
+variable    chirality equal -1  # +1 for CCW ABPs, -1 for CW
+# -*-*-*-*-*-*--*-*-*--*-*-*-
+variable    Dtheta equal ${v0}/${lp}
+variable    omega equal ${chirality}*${v0}/${lr}
+variable    gamma_x equal 1/${mu_x}
+variable    sigma equal 2
+variable    rcut equal ${sigma}*2^(1.0/6.0)  # for WCA potential
+variable    dt equal 0.01
+
+variable    s equal 40       # Nevery
+variable    p equal 10000       # Nrepeat
+variable    d equal 400000       # Nfreq
+
+variable    sgk equal ceil(100*${massline})       # Nevery
+variable    pgk equal 10000                    # Nrepeat
+variable    dgk equal ${sgk}*${pgk}       # Nfreq
+
+# problem setup
+units       lj
+dimension   2
+atom_style  bond
+neigh_modify    delay 0 every 1
+comm_modify cutoff 5
+
+# Make ABPs:
+lattice         sq ${rho}  # Set the lattice density for ABPs.
+region          simbox block -${L2} ${L2} -${L2} ${L2} -0.1 0.1 units box # Box units, rather than lattice
+create_box      2 simbox &
+                bond/types 1 &
+                extra/bond/per/atom 1
+molecule        line ../passive_objects/line_10.txt
+create_atoms    1 single 0 0 0 mol line 12345 rotate 90 0 0 1 # Insert line obstacle with random rotation
+create_atoms    1 random ${Nabp} ${seed} NULL overlap 2 maxtry 100 # Insert passive tracers randomly
+
+group           abp type 1
+group           line type 2
+
+
+# Write out the simulation parameters for post-processing:
+variable        ly equal ly
+variable        lx equal lx
+print           '{'                                 file   params.json
+print           '   "massline": ${massline},'       append params.json
+print           '   "rho": ${rho},'                 append params.json
+print           '   "lx": ${lx},'                   append params.json
+print           '   "ly": ${ly},'                   append params.json
+print           '   "Dtheta": ${Dtheta},'           append params.json
+print           '   "v0":${v0},'                    append params.json
+print           '   "lp": ${lp},'                   append params.json
+print           '   "lr": ${lr},'                   append params.json
+print           '   "gamma_x":${gamma_x},'          append params.json
+print           '   "Dx":${Dx},'                    append params.json
+print           '   "omega":${omega},'              append params.json
+print           '   "rcut": ${rcut},'               append params.json
+print           '   "dt": ${dt},'                   append params.json
+print           '   "s": $s,'                   append params.json
+print           '   "sgk": ${sgk},'                   append params.json
+print           '}'                                 append params.json
+
+# Define interactions
+pair_style      lj/cut 1
+pair_modify     shift yes
+pair_coeff      * * 0 0
+pair_coeff      1 2 1 ${sigma} ${rcut}
+mass            1 1.0
+mass            2 ${massline}  # Mass of one bead in the line particle
+delete_atoms    overlap 0.5 abp line  # NOW: Delete ABPs overlapping the line object (with random rotation)
+
+
+# Define fixes that affect dynamics
+fix             1 abp property/atom d_thetavec  # Initialize vector of directors (this gets used inside fix abp)
+fix             2 abp abp ${Dx} ${Dtheta} ${gamma_x} ${omega} ${v0} ${seed} # DX DTHETA GAMMA_X OMEGA V0 SEED
+# fix             2a abp langevin 1 1 ${mu_x} ${seed} # Passive bath
+# fix             2b abp nve                          # Passive bath
+fix             rigid line rigid/nve molecule force 1 off off off  ## Pinned
+# fix             rigid line rigid/small molecule  ## Free
+fix             2d all enforce2d
+
+
+
+# Equilibration run
+variable        theta_init atom random(0,2*PI,${seed})
+set             atom * d_thetavec v_theta_init  # Initialize ABPs with random directions
+write_dump      all xyz init.xyz
+thermo          1000
+thermo_style    custom step temp press cpu spcpu density lx
+timestep        ${dt}
+run             10000
+write_dump      all xyz eq.xyz
+
+# Production run:
+label           production_run
+log             out/log.out
+timestep        ${dt}
+
+
+# Static GK: (all correlators, check that cross terms are zero for line)
+# variable        xcom equal xcm(line,x)
+# variable        ycom equal xcm(line,y)
+# variable        dxatom atom x-v_xcom
+# variable        dyatom atom y-v_ycom
+# variable        torque_atom atom (v_dxatom*fy-v_dyatom*fx)
+# compute         torque line reduce sum v_torque_atom
+# # variable        torque_rigid equal f_rigid[1][12]
+# # fix             torque_rigid_avg line ave/time $s 1 $s v_torque_rigid ave running overwrite
+# fix             torque_avg line ave/time $s 1 $s c_torque ave running overwrite file out/torque_avg.out
+# variable        dtorque equal c_torque-f_torque_avg
+
+# variable        fx atom fx
+# compute         fxall line reduce sum v_fx
+# fix             fx_avg line ave/time $s 1 $s c_fxall ave running overwrite file out/fx_avg.out
+# variable        dfxall equal c_fxall-f_fx_avg
+
+# variable        fy atom fy
+# compute         fyall line reduce sum v_fy
+# fix             fy_avg line ave/time $s 1 $s c_fyall ave running overwrite file out/fy_avg.out
+# variable        dfyall equal c_fyall-f_fy_avg
+
+# # fix             corr line ave/correlate $s $p $d c_torque c_fxall c_fyall &
+# #                 type full ave running overwrite file out/corr.out
+
+# fix             dcorr line ave/correlate $s $p $d v_dtorque v_dfxall v_dfyall &
+#                 type full ave running overwrite start 100000 file out/dcorr.out
+
+
+# compute with variables: (can suffer from boundary crossings)
+# compute         ru all property/atom xu yu zu # unwrapped positions
+# variable        x equal c_ru[2][1]-c_ru[1][1]   # x2-x1
+# variable        y equal c_ru[2][2]-c_ru[1][2]   # y2-y1
+variable        dx equal x[2]-x[1]   # x2-x1  Note, we don't need unwrapped coords
+variable        dy equal y[2]-y[1]   # y2-y1  because of translational potential
+variable        thetarod equal atan2(v_dy,v_dx)
+variable        vx equal vx[2]-vx[1]
+variable        vy equal vy[2]-vy[1]
+variable        omegarod equal (v_dx*v_vy-v_dy*v_vx)/.01 # .01 = dx^2+dy^2
+fix             omega_avg line ave/time 10 10000 100000 v_omegarod file out/omega.out  #ave running overwrite
+
+# Compute with rigid/local
+# compute         omegaloc all rigid/local rigid omegaz
+# compute         omega all reduce ave c_omegaloc inputs local
+# fix             omega_avg line ave/time 10 10000 100000 c_omega file out/omega.out  #ave running overwrite
+
+
+# variable        diff equal c_omega-v_omegarod
+# dump            traj all xyz 100 out/traj.xyz
+thermo_style    custom step temp press cpu spcpu
+thermo          10000
+run             1000000000
+write_dump      all xyz final.xyz
